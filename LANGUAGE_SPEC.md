@@ -76,6 +76,19 @@ Raw pointers support `Type*`, `Type**`, `nullptr`, unary `&` and `*`, and `->` m
 
 References, explicit casts, qualified C++ names, and C++ template declarations remain outside this version. Native types can be arguments to Simple C generics. Native bindings expose declarations without enabling arbitrary C++ source syntax. The bundled `win32` module provides `windows.h` declarations and links `user32` for window creation and message handling.
 
+## Bundled containers
+
+`import containers;` exposes `Vector<T>` through a bundled native header that aliases `std::vector<T>`. It requires no explicit link directive. Applications use the ordinary import, generic type, constructor, indexing, and method-call syntax:
+
+```cpp
+Vector<int> values{};
+values.push_back(10);
+int first = values[0];
+Vector<int> copy = values;
+```
+
+This is a native binding, not a new language primitive. Vector initialization, allocation, copying, destruction, and method requirements follow C++ semantics. Empty braces produce an empty vector; nonempty braces supply initial elements. Copying duplicates element values into separate storage, while pointer elements retain the same addresses. Indexing is unchecked, and storage reallocation invalidates pointers into the vector. Nested vectors and Simple C class elements are supported. Invalid element operations and native type argument counts are diagnosed by the C++ compiler.
+
 ## Local arrays
 
 Fixed-size local arrays use C-style declarations and indexing:

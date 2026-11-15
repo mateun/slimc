@@ -498,6 +498,18 @@ class Parser:
         self.expect(closing)
         return arguments
 
+    def generic_construction_ahead(self) -> bool:
+        # Native type names are supplied by C++ headers, not our symbol scan.
+        # Braces distinguish a nested native construction from comparisons.
+        position = self.position
+        try:
+            self.type_arguments()
+            return self.current.text == "{"
+        except SourceError:
+            return False
+        finally:
+            self.position = position
+
     def expression(self, minimum: int = 1) -> Expr:
         token = self.current
         if token.text in {"+", "-", "!", "++", "--", "&", "*", "~"}:
@@ -518,6 +530,7 @@ class Parser:
             if self.current.text == "<" and (
                 name.text in self.known_types | self.generic_scope | self.generic_functions
                 or self.tokens[self.position + 1].text in self.known_types | self.generic_scope
+                or self.generic_construction_ahead()
             ):
                 name = type_ref(name, self.type_arguments())
                 specialized = True

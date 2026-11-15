@@ -2,7 +2,7 @@
 
 A minimal transpiler for a small C-like language with value classes. It parses `.sc` source files and generates C++17. The frontend is written in Python and uses only the standard library.
 
-The broader language design is in [LANGUAGE_SPEC.md](LANGUAGE_SPEC.md). This implementation covers functions, simple classes, arithmetic operator methods, and imports across source files.
+The broader language design is in [LANGUAGE_SPEC.md](LANGUAGE_SPEC.md). This implementation covers functions, simple classes, generics, arithmetic operator methods, imports across source files, and native bindings.
 
 ## Run the example
 
@@ -237,6 +237,43 @@ python run.py examples/generics/main.sc --build-dir build/generics
 
 It imports `Pair<T>`, `max<T>`, and `identity<T>`, exercises an overloaded `+` and nested class values, and prints `7`, `13`, `27`, `2.5`, `3`, and `99` on separate lines.
 
+## Containers
+
+Import the bundled `containers` module to use `Vector<T>`, an alias for C++ `std::vector<T>`:
+
+```cpp
+import containers;
+
+int main() {
+    Vector<int> numbers{};
+    numbers.push_back(10);
+    numbers.push_back(20);
+    print(numbers[0]);     // 10
+    print(numbers.size()); // 2
+
+    Vector<int> copy = numbers;
+    copy[0] = 99;
+    print(numbers[0]);     // 10
+    return 0;
+}
+```
+
+The binding lives in [containers.sc](bindings/containers.sc) and includes a small [native alias header](bindings/containers.h). Application files need only the import. No extra library installation or `#link` directive is needed with the supported C++ toolchains.
+
+Use the standard vector API through ordinary method calls, including `push_back`, `pop_back`, `size`, `empty`, `reserve`, and `clear`. Empty braces create an empty vector; `Vector<int>{10, 20}` supplies initial elements. `Vector<int>{4}` contains the single value `4`, rather than four elements. Nested vectors, such as `Vector<Vector<int>>`, and vectors of Simple C classes also work.
+
+Vectors manage their storage through C++. Copy initialization, assignment, and passing a vector by value copy its elements into independent storage. Pointer elements copy addresses and do not transfer ownership of the pointed-to objects. Destroying a vector releases its storage and destroys its elements. Indexing with `[]` is unchecked; operations that reallocate storage invalidate pointers into that storage. Methods keep their C++ requirements: for example, growing with `resize(count)` requires default-constructible elements, which a Simple C class with required fields does not provide.
+
+Native type and method errors are checked by the C++ compiler. The binding exposes the existing vector API within the syntax Simple C supports; it adds no separate container implementation.
+
+Run [the container example](examples/containers/main.sc):
+
+```sh
+python run.py examples/containers/main.sc --build-dir build/containers
+```
+
+It prints `60`, `10`, `99`, `2`, `3`, and `1` on separate lines, covering growth, iteration, copying, and class elements.
+
 ## Operator methods
 
 Define binary arithmetic on a class with `op_+`, `op_-`, `op_*`, `op_/`, or `op_%`:
@@ -288,6 +325,8 @@ python -m unittest discover -s tests -v
 The suite checks frontend diagnostics and compiles and executes generated programs. Integration tests require a C++ compiler and fail if none is available. They cover copying, default and required fields, local arrays, declaration order, control flow, recursion, literals, operator methods and precedence, and source locations in compiler errors. Import tests also cover relative lookup, repeated and circular imports, shared dependencies, name collisions, missing files, and protection against overwriting imported sources. Linking tests build a real static library, verify symbol resolution through a native binding, and check transitive link requirements and missing-library failures. They require the MSVC librarian or `ar`, plus D3D11 on Windows or the system math library elsewhere. Native tests cover SDK-style types, pointers, functions, interface methods, and compiler diagnostics.
 
 Generic tests cover multiple and nested type arguments, pointer fields, independent copies, methods and operators, cross-module calls and recursion, comparisons, native types, and invalid instantiations.
+
+Container tests exercise the bundled import from other directories, transitive imports, vector operations, class and nested vector elements, copying through assignment and function parameters, pointer elements, and native compiler diagnostics.
 
 The default suite builds the D3D11 window example on Windows without launching it. The visual smoke test is opt-in and opens a window for three presented frames, then exits. To run it in PowerShell:
 
