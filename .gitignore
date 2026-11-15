@@ -1,0 +1,34 @@
+# Python caches and local environments
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Generated builds
+build/
+build-*/
+cmake-build-*/
+out/
+dist/
+.vs/
+
+# Compiled binaries, libraries, and compiler/debug artifacts
+*.exe
+*.dll
+*.so
+*.so.*
+*.dylib
+*.lib
+*.a
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.pch
+*.gch
+*.idb
+*.ipdb
+*.iobj
+*.dSYM/
