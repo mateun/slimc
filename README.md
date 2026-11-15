@@ -164,7 +164,7 @@ context->ClearRenderTargetView(target, red);
 
 Array sizes must be positive integer literals. Brace initialization is required, with or without `=`, and omitted elements are value-initialized. Indexing uses `values[index]` without runtime bounds checks. Arrays decay to pointers when passed to native APIs or pointer parameters. Array fields, multidimensional arrays, and dynamic arrays remain unsupported.
 
-This is a limited native bridge. References, explicit casts, qualified C++ names, and C++ template syntax are not supported yet. APIs that need those source constructs will require further language support.
+This is a limited native bridge. References, explicit casts, qualified C++ names, and C++ template declarations are not supported. Native types can be arguments to Simple C generics. APIs that need unsupported source constructs will require further language support.
 
 ## Supported language
 
@@ -200,6 +200,42 @@ class Point {
 - Comments: `//` and `/* ... */`.
 
 `print(value)` is a temporary built-in for examples. It prints one scalar or string literal followed by a newline. Booleans print as `0` or `1`; printing classes is unsupported. Identifiers starting with `_`, containing `__`, and the names `print`, `simple_c_detail`, and `op_` are reserved. The `op_` prefix followed by a supported operator is used for operator methods.
+
+## Generics
+
+Put type parameters directly after a class or free function name:
+
+```cpp
+class Box<T> {
+    T value;
+    T get() { return value; }
+}
+
+T max<T>(T a, T b) {
+    if (a > b) return a;
+    return b;
+}
+
+int main() {
+    Box<int> number{7};
+    print(max<int>(number.get(), 3));
+    return 0;
+}
+```
+
+Classes and functions can have multiple type parameters, such as `Pair<A, B>`. Supply every type argument explicitly at use sites: `Pair<int, float>`, `max<int>(a, b)`. Nested types such as `Box<Pair<int, float>>` and pointer arguments such as `Box<int*>` work. Methods and operator methods inside a generic class can use its type parameters; methods cannot declare their own type parameters yet.
+
+Generics work across imports with the same declaration-order rules as ordinary classes and functions. Initialization and copying follow the existing class rules. The transpiler emits C++ templates, and the C++ compiler checks operations for each instantiated type. For example, `max<Point>` fails to compile if `Point` does not support `>`.
+
+Type parameters are types only. Inference, constraints, default type arguments, specialization, and variadic or value parameters are outside this version. Duplicate parameters, wrong argument counts, and variables that shadow type parameters are rejected by the frontend.
+
+Run [the generic classes and functions example](examples/generics/main.sc):
+
+```sh
+python run.py examples/generics/main.sc --build-dir build/generics
+```
+
+It imports `Pair<T>`, `max<T>`, and `identity<T>`, exercises an overloaded `+` and nested class values, and prints `7`, `13`, `27`, `2.5`, `3`, and `99` on separate lines.
 
 ## Operator methods
 
@@ -239,7 +275,7 @@ Generated `#line` directives map compiler errors back to the `.sc` file. The fro
 
 ## Current limits
 
-Each compilation accepts one entry file and follows its imports. Generics, references, dynamic or multidimensional arrays, managed resource ownership, custom clone operations, inheritance, and global variables are not implemented. Fixed-size arrays are supported as locals. Native interop supports header declarations and raw pointers within the language's expression syntax. Operator overloads are limited to the binary arithmetic methods above. Unsupported syntax is rejected rather than passed through as arbitrary C++.
+Each compilation accepts one entry file and follows its imports. References, dynamic or multidimensional arrays, managed resource ownership, custom clone operations, inheritance, and global variables are not implemented. Fixed-size arrays are supported as locals. Native interop supports header declarations and raw pointers within the language's expression syntax. Operator overloads are limited to the binary arithmetic methods above. Unsupported syntax is rejected rather than passed through as arbitrary C++.
 
 Classes cannot contain a cycle of embedded values. Class-valued field defaults are not supported yet; supply these values explicitly in braces. No performance benchmarks or cross-compiler compatibility claims are made by this prototype.
 
@@ -250,6 +286,8 @@ python -m unittest discover -s tests -v
 ```
 
 The suite checks frontend diagnostics and compiles and executes generated programs. Integration tests require a C++ compiler and fail if none is available. They cover copying, default and required fields, local arrays, declaration order, control flow, recursion, literals, operator methods and precedence, and source locations in compiler errors. Import tests also cover relative lookup, repeated and circular imports, shared dependencies, name collisions, missing files, and protection against overwriting imported sources. Linking tests build a real static library, verify symbol resolution through a native binding, and check transitive link requirements and missing-library failures. They require the MSVC librarian or `ar`, plus D3D11 on Windows or the system math library elsewhere. Native tests cover SDK-style types, pointers, functions, interface methods, and compiler diagnostics.
+
+Generic tests cover multiple and nested type arguments, pointer fields, independent copies, methods and operators, cross-module calls and recursion, comparisons, native types, and invalid instantiations.
 
 The default suite builds the D3D11 window example on Windows without launching it. The visual smoke test is opt-in and opens a window for three presented frames, then exits. To run it in PowerShell:
 

@@ -74,7 +74,7 @@ If any native header is reachable, unknown type names are left for the C++ compi
 
 Raw pointers support `Type*`, `Type**`, `nullptr`, unary `&` and `*`, and `->` member access. Pointer locals require an `=` initializer. These pointers carry no automatic ownership or reference counting. The caller must follow the native API's lifetime rules, including explicit COM `Release()` calls where needed. Bitwise `&`, `|`, `^`, and `~` support native flags with C/C++ precedence.
 
-References, explicit casts, qualified C++ names, and native template syntax remain outside this version. Native bindings expose declarations without enabling arbitrary C++ source syntax. The bundled `win32` module provides `windows.h` declarations and links `user32` for window creation and message handling.
+References, explicit casts, qualified C++ names, and C++ template declarations remain outside this version. Native types can be arguments to Simple C generics. Native bindings expose declarations without enabling arbitrary C++ source syntax. The bundled `win32` module provides `windows.h` declarations and links `user32` for window creation and message handling.
 
 ## Local arrays
 
@@ -171,7 +171,15 @@ Pair<int> numbers{3, 7};
 int larger = max<int>(numbers.first, numbers.second);
 ```
 
-The transpiler generates C++ templates. Generic operations must be valid for the supplied types; invalid uses produce compile-time errors. Type inference and a syntax for generic constraints are outside this draft.
+Generic classes and free functions are implemented. Parameters are types only, with one or more distinct names: `class Pair<A, B>` or `B convert<A, B>(A value)`. They are in scope throughout the declaration, including a function's return type. They cannot conflict with another declared type or their own declaration name, and fields, methods, parameters, and locals cannot shadow them.
+
+Every use supplies all type arguments explicitly. Nested arguments such as `Box<Pair<int>>`, pointer arguments such as `Box<int*>`, and native types from imported bindings are supported. Use braces for class construction and parentheses for function calls. A generic class must also spell out its arguments when referring to itself, for example `Pair<T> op_+(Pair<T> other)`.
+
+Ordinary methods and operator methods can use their class's type parameters. Methods with their own type parameters, type inference, constraints, default arguments, specialization, variadic parameters, and value parameters are unsupported. Generic definitions may be imported and used before their declarations, just like ordinary classes and functions.
+
+Initialization, copying, and raw pointer behavior are unchanged for instantiated classes. Embedded-value cycles are rejected; a generic wrapper that stores only a pointer to its argument does not create such a cycle.
+
+The transpiler generates C++ templates. It checks type parameter scope and argument counts; the C++ compiler checks that operations are valid for each instantiated type. Invalid uses produce compile-time errors mapped to the original source, although diagnostics may mention generated C++ template details.
 
 ## Operator methods
 

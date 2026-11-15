@@ -39,7 +39,6 @@ class FrontendTests(unittest.TestCase):
 
     def test_rejects_unsupported_features(self):
         sources = [
-            "class Box<T> { T value; }",
             "class Child : Parent {}",
             "int main() { int* pointer; }",
             "class Buffer { Buffer clone() { return Buffer{}; } }",

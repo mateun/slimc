@@ -18,6 +18,20 @@ class Token:
     filename: str = ""
 
 
+@dataclass
+class TypeRef(Token):
+    name: str = ""
+    arguments: list[TypeRef] = field(default_factory=list)
+    pointers: int = 0
+
+
+def type_ref(token: Token, arguments=(), pointers: int = 0) -> TypeRef:
+    arguments = list(arguments)
+    suffix = "<" + ", ".join(arg.text for arg in arguments) + ">" if arguments else ""
+    return TypeRef(token.text + suffix + "*" * pointers, "type", token.line, token.column,
+                   token.filename, token.text, arguments, pointers)
+
+
 class SourceError(Exception):
     def __init__(self, filename: str, token: Token, message: str):
         filename = token.filename or filename
@@ -90,7 +104,7 @@ class Stmt:
 
 @dataclass
 class Variable:
-    type: Token
+    type: TypeRef
     name: Token
     initializer: Expr | None = None
     array_size: int | None = None
@@ -98,10 +112,11 @@ class Variable:
 
 @dataclass
 class Function:
-    type: Token
+    type: TypeRef
     name: Token
     parameters: list[Variable]
     body: Stmt
+    type_parameters: list[Token] = field(default_factory=list)
 
 
 @dataclass
@@ -109,6 +124,7 @@ class Class:
     name: Token
     fields: list[Variable]
     methods: list[Function]
+    type_parameters: list[Token] = field(default_factory=list)
 
 
 @dataclass
@@ -155,6 +171,27 @@ def linked_libraries(program: Program) -> list[str]:
     return list(dict.fromkeys(link.library for link in program.links))
 
 
+def scan_symbols(tokens: list[Token]) -> tuple[set[str], set[str]]:
+    """Collect top-level type and generic function names before parsing bodies."""
+    types, functions = set(), set()
+    depth = 0
+    for index, token in enumerate(tokens[:-1]):
+        if token.text == "{":
+            depth += 1
+        elif token.text == "}":
+            depth -= 1
+        elif depth == 0:
+            if token.text == "class" and tokens[index + 1].kind == "id":
+                types.add(tokens[index + 1].text)
+            if token.kind == "id" and tokens[index + 1].text == "<":
+                end = index + 2
+                while end < len(tokens) and (tokens[end].kind == "id" or tokens[end].text == ","):
+                    end += 1
+                if end + 1 < len(tokens) and tokens[end].text == ">" and tokens[end + 1].text == "(":
+                    functions.add(token.text)
+    return types, functions
+
+
 class Parser:
     PRECEDENCE = {
         "=": 1, "+=": 1, "-=": 1, "*=": 1, "/=": 1, "%=": 1,
@@ -164,9 +201,13 @@ class Parser:
         "+": 9, "-": 9, "*": 10, "/": 10, "%": 10,
     }
 
-    def __init__(self, source: str, filename: str):
+    def __init__(self, source: str, filename: str, known_types=(), generic_functions=()):
         self.filename = filename
         self.tokens = lex(source, filename)
+        local_types, local_functions = scan_symbols(self.tokens)
+        self.known_types = PRIMITIVES | local_types | set(known_types)
+        self.generic_functions = local_functions | set(generic_functions)
+        self.generic_scope: set[str] = set()
         self.position = 0
         self.loop_depth = 0
 
@@ -214,12 +255,51 @@ class Parser:
         self.take()
         return Token("op_" + operator.text, "operator", prefix.line, prefix.column, prefix.filename)
 
-    def type_name(self) -> Token:
+    def type_arguments(self) -> list[TypeRef]:
+        self.expect("<")
+        arguments = [self.type_name()]
+        while self.accept(","):
+            arguments.append(self.type_name())
+        self.expect(">")
+        return arguments
+
+    def type_parameters(self) -> list[Token]:
+        if not self.accept("<"):
+            return []
+        parameters = [self.identifier()]
+        while self.accept(","):
+            parameters.append(self.identifier())
+        self.expect(">")
+        return parameters
+
+    def type_name(self) -> TypeRef:
         base = self.take() if self.current.text in PRIMITIVES else self.identifier()
-        name = base.text
+        arguments = self.type_arguments() if self.current.text == "<" else []
+        pointers = 0
         while self.accept("*"):
-            name += "*"
-        return Token(name, base.kind, base.line, base.column, base.filename)
+            pointers += 1
+        return type_ref(base, arguments, pointers)
+
+    def import_declaration(self) -> Import:
+        token = self.expect("import")
+        parts = [self.identifier().text]
+        while self.accept("."):
+            parts.append(self.identifier().text)
+        self.expect(";")
+        return Import(token, parts)
+
+    def scan_imports(self) -> list[Import]:
+        imports, depth = [], 0
+        while self.current.kind != "eof":
+            if depth == 0 and self.current.text == "import":
+                imports.append(self.import_declaration())
+                continue
+            token = self.take()
+            if token.text == "{":
+                depth += 1
+            elif token.text == "}":
+                depth -= 1
+        return imports
 
     def parse(self) -> Program:
         classes, functions, imports, links, native_headers = [], [], [], [], []
@@ -250,19 +330,18 @@ class Parser:
                     native_headers.append(NativeHeader(directive, name))
                 continue
             if self.current.text == "import":
-                token = self.take()
-                parts = [self.identifier().text]
-                while self.accept("."):
-                    parts.append(self.identifier().text)
-                self.expect(";")
-                imports.append(Import(token, parts))
+                imports.append(self.import_declaration())
                 continue
             if self.accept("class"):
                 name = self.identifier()
+                type_parameters = self.type_parameters()
+                self.generic_scope = {parameter.text for parameter in type_parameters}
                 self.expect("{")
                 fields, methods = [], []
                 while self.current.text != "}":
                     type_name, member = self.type_name(), self.member_name()
+                    if self.current.text == "<":
+                        self.error("generic methods are not supported yet; use a generic free function")
                     if self.current.text == "(" or member.kind == "operator":
                         if member.text == "clone":
                             self.error("custom cloning is not supported in this first version", member)
@@ -275,7 +354,8 @@ class Parser:
                         fields.append(Variable(type_name, member, initializer))
                 self.expect("}")
                 self.accept(";")
-                classes.append(Class(name, fields, methods))
+                classes.append(Class(name, fields, methods, type_parameters))
+                self.generic_scope = set()
             else:
                 type_name, name = self.type_name(), self.identifier()
                 functions.append(self.function(type_name, name))
@@ -288,7 +368,10 @@ class Parser:
             and expr.args[0].kind == "literal" and expr.args[0].token.kind == "number"
         )
 
-    def function(self, type_name: Token, name: Token) -> Function:
+    def function(self, type_name: TypeRef, name: Token) -> Function:
+        type_parameters = self.type_parameters()
+        previous_scope = self.generic_scope
+        self.generic_scope = previous_scope | {parameter.text for parameter in type_parameters}
         self.expect("(")
         parameters = []
         if self.current.text != ")":
@@ -297,7 +380,9 @@ class Parser:
                 if not self.accept(","):
                     break
         self.expect(")")
-        return Function(type_name, name, parameters, self.block())
+        body = self.block()
+        self.generic_scope = previous_scope
+        return Function(type_name, name, parameters, body, type_parameters)
 
     def block(self) -> Stmt:
         start = self.expect("{")
@@ -312,15 +397,21 @@ class Parser:
     def declaration_ahead(self) -> bool:
         if self.current.kind != "id" or self.current.text in KEYWORDS - PRIMITIVES:
             return False
-        index = self.position + 1
-        while self.tokens[index].text == "*":
-            index += 1
-        if self.tokens[index].kind != "id" or self.tokens[index].text in KEYWORDS:
-            return False
-        if index == self.position + 1:
+        position = self.position
+        try:
+            declared_type = self.type_name()
+            if self.current.kind != "id" or self.current.text in KEYWORDS:
+                return False
+            if declared_type.pointers:
+                return self.tokens[self.position + 1].text == "=" or declared_type.name in PRIMITIVES
+            if declared_type.arguments:
+                return (declared_type.name in self.known_types | self.generic_scope
+                        or self.tokens[self.position + 1].text in {"=", "{", "["})
             return True
-        # Pointer locals use '='. Do not misparse 'value * Other{}' as a declaration.
-        return self.tokens[index + 1].text == "=" or self.current.text in PRIMITIVES
+        except SourceError:
+            return False
+        finally:
+            self.position = position
 
     def variable(self) -> Stmt:
         type_name, name = self.type_name(), self.identifier()
@@ -423,7 +514,17 @@ class Parser:
                 self.error("print must be called with one argument")
         elif token.text in PRIMITIVES or (token.kind == "id" and token.text not in KEYWORDS):
             name = self.take() if token.text in PRIMITIVES else self.identifier()
-            left = Expr("construct", name, self.arguments("}")) if self.accept("{") else Expr("name", name)
+            specialized = False
+            if self.current.text == "<" and (
+                name.text in self.known_types | self.generic_scope | self.generic_functions
+                or self.tokens[self.position + 1].text in self.known_types | self.generic_scope
+            ):
+                name = type_ref(name, self.type_arguments())
+                specialized = True
+            if self.accept("{"):
+                left = Expr("construct", name if specialized else type_ref(name), self.arguments("}"))
+            else:
+                left = Expr("generic_name" if specialized else "name", name)
         else:
             self.error(f"expected an expression, found '{token.text}'")
         while True:
@@ -457,11 +558,12 @@ class ModuleLoader:
     """Load the reachable module graph once, including cycles and shared imports."""
 
     def __init__(self):
+        self.sources: dict[Path, str] = {}
         self.modules: dict[Path, Program] = {}
 
     def load(self, path: Path, *, source: str | None = None, origin: Import | None = None):
         path = path.resolve()
-        if path in self.modules:
+        if path in self.sources:
             return
         if source is None:
             try:
@@ -472,10 +574,9 @@ class ModuleLoader:
                     raise SourceError(origin.token.filename, origin.token,
                                       f"cannot import '{name}' from '{path}': {error}") from error
                 raise
-        program = Parser(source, str(path)).parse()
         # Register before visiting dependencies so cyclic imports terminate.
-        self.modules[path] = program
-        for dependency in program.imports:
+        self.sources[path] = source
+        for dependency in Parser(source, str(path)).scan_imports():
             target = path.parent.joinpath(*dependency.parts).with_suffix(".sc")
             if not target.exists():
                 bundled = BINDINGS_DIRECTORY.joinpath(*dependency.parts).with_suffix(".sc")
@@ -484,6 +585,13 @@ class ModuleLoader:
             self.load(target, origin=dependency)
 
     def combined(self) -> Program:
+        known_types, generic_functions = set(), set()
+        for path, source in self.sources.items():
+            types, functions = scan_symbols(lex(source, str(path)))
+            known_types.update(types)
+            generic_functions.update(functions)
+        self.modules = {path: Parser(source, str(path), known_types, generic_functions).parse()
+                        for path, source in self.sources.items()}
         return Program(
             [cls for module in self.modules.values() for cls in module.classes],
             [function for module in self.modules.values() for function in module.functions],
@@ -501,6 +609,7 @@ class ModuleLoader:
 def validate(program: Program, filename: str) -> list[Class]:
     """Validate declared types and order classes by their embedded value fields."""
     classes = {item.name.text: item for item in program.classes}
+    functions = {item.name.text: item for item in program.functions}
     types = PRIMITIVES | classes.keys()
 
     def unique(items):
@@ -513,42 +622,87 @@ def validate(program: Program, filename: str) -> list[Class]:
                                   f"duplicate declaration '{item.name.text}'; first declared at {location}")
             seen[item.name.text] = item.name
 
-    def check_type(token, allow_void=False):
-        base = token.text.rstrip("*")
-        if base not in types and not program.native_headers:
+    def check_type(token: TypeRef, scope=frozenset(), allow_void=False):
+        base = token.name
+        if base not in types | scope and not program.native_headers:
             raise SourceError(filename, token, f"unknown type '{token.text}'")
-        if token.text == "void" and not allow_void:
+        if base in classes:
+            expected = len(classes[base].type_parameters)
+            if len(token.arguments) != expected:
+                raise SourceError(filename, token,
+                                  f"type '{base}' expects {expected} type arguments, got {len(token.arguments)}")
+        elif token.arguments and base in PRIMITIVES | scope:
+            raise SourceError(filename, token, f"type '{base}' does not accept type arguments")
+        if base == "void" and not token.pointers and not allow_void:
             raise SourceError(filename, token, "void is only valid as a function return type")
+        for argument in token.arguments:
+            check_type(argument, scope)
 
-    def check_expression(expr):
+    def check_expression(expr, scope):
         if expr is None:
             return
         if expr.kind == "construct":
-            check_type(expr.token)
-        if expr.kind == "name" and expr.token.text in types:
+            check_type(expr.token, scope)
+        if expr.kind == "name" and expr.token.text in types | scope:
             raise SourceError(filename, expr.token, "use braces to construct a value")
-        if expr.kind == "call" and expr.args[0].kind == "name" and expr.args[0].token.text in types:
-            raise SourceError(filename, expr.args[0].token, "use braces to construct a value")
+        if expr.kind == "name" and expr.token.text in functions and functions[expr.token.text].type_parameters:
+            raise SourceError(filename, expr.token,
+                              f"generic function '{expr.token.text}' requires explicit type arguments")
+        if expr.kind == "generic_name":
+            token = expr.token
+            if token.name in types | scope:
+                raise SourceError(filename, token, "use braces to construct a value")
+            if token.name in functions:
+                expected = len(functions[token.name].type_parameters)
+                if len(token.arguments) != expected:
+                    raise SourceError(filename, token,
+                                      f"function '{token.name}' expects {expected} type arguments, got {len(token.arguments)}")
+            elif not program.native_headers:
+                raise SourceError(filename, token, f"unknown generic function '{token.name}'")
+            for argument in token.arguments:
+                check_type(argument, scope)
         for argument in expr.args:
-            check_expression(argument)
+            check_expression(argument, scope)
 
-    def check_statement(stmt):
+    def check_statement(stmt, scope):
         if stmt.kind == "variable":
-            check_type(stmt.value.type)
-            check_expression(stmt.value.initializer)
+            check_type(stmt.value.type, scope)
+            if stmt.value.name.text in scope:
+                raise SourceError(filename, stmt.value.name, "a variable cannot shadow a type parameter")
+            check_expression(stmt.value.initializer, scope)
         elif stmt.kind in {"expression", "return", "if", "while"}:
-            check_expression(stmt.value)
+            check_expression(stmt.value, scope)
         elif stmt.kind == "for":
             initial, condition, step = stmt.value
             if initial:
-                check_statement(initial)
-            check_expression(condition)
-            check_expression(step)
+                check_statement(initial, scope)
+            check_expression(condition, scope)
+            check_expression(step, scope)
         for child in stmt.children:
-            check_statement(child)
+            check_statement(child, scope)
+
+    def check_type_parameters(parameters, owner):
+        scope = set()
+        for parameter in parameters:
+            if parameter.text in scope:
+                raise SourceError(filename, parameter, f"duplicate type parameter '{parameter.text}'")
+            if parameter.text in types or parameter.text == owner.text:
+                raise SourceError(filename, parameter, f"type parameter '{parameter.text}' conflicts with a type or its declaration name")
+            scope.add(parameter.text)
+        return scope
+
+    def check_function(function, scope):
+        check_type(function.type, scope, allow_void=True)
+        unique(function.parameters)
+        for parameter in function.parameters:
+            check_type(parameter.type, scope)
+            if parameter.name.text in scope:
+                raise SourceError(filename, parameter.name, "a parameter cannot shadow a type parameter")
+        check_statement(function.body, scope)
 
     unique([*program.classes, *program.functions])
     for cls in program.classes:
+        scope = check_type_parameters(cls.type_parameters, cls.name)
         unique([*cls.fields, *cls.methods])
         for method in cls.methods:
             if method.name.kind == "operator":
@@ -560,21 +714,59 @@ def validate(program: Program, filename: str) -> list[Class]:
         for member in [*cls.fields, *cls.methods]:
             if member.name.text == cls.name.text:
                 raise SourceError(filename, member.name, "a member cannot have its class's name")
+            if member.name.text in scope:
+                raise SourceError(filename, member.name, "a member cannot shadow a type parameter")
         for variable in cls.fields:
-            check_type(variable.type)
-            if variable.initializer and variable.type.text in classes:
+            check_type(variable.type, scope)
+            if variable.initializer and variable.type.name in classes and not variable.type.pointers:
                 raise SourceError(filename, variable.name, "class-valued field defaults are not supported yet")
-    for function in [*program.functions, *(method for cls in program.classes for method in cls.methods)]:
-        check_type(function.type, allow_void=True)
-        unique(function.parameters)
-        for parameter in function.parameters:
-            check_type(parameter.type)
-        check_statement(function.body)
+        for method in cls.methods:
+            check_function(method, scope)
     for function in program.functions:
-        if function.name.text == "main" and (function.type.text != "int" or function.parameters):
+        scope = check_type_parameters(function.type_parameters, function.name)
+        check_function(function, scope)
+        if function.name.text == "main" and (function.type.text != "int" or function.parameters or function.type_parameters):
             raise SourceError(filename, function.name, "the entry point must be int main()")
 
     ordered, active, done = [], set(), set()
+
+    # Only arguments stored by value require complete types. In particular,
+    # Link<Node> may be a field of Node when Link<T> stores T*.
+    embedded_parameters = {name: set() for name in classes}
+
+    def embedded_arguments(type_name):
+        if type_name.name not in classes:
+            return type_name.arguments
+        parameters = classes[type_name.name].type_parameters
+        return [argument for parameter, argument in zip(parameters, type_name.arguments)
+                if parameter.text in embedded_parameters[type_name.name]]
+
+    def used_parameters(type_name, scope):
+        if type_name.pointers:
+            return set()
+        used = {type_name.name} & scope
+        for argument in embedded_arguments(type_name):
+            used.update(used_parameters(argument, scope))
+        return used
+
+    changed = True
+    while changed:
+        changed = False
+        for cls in program.classes:
+            used = embedded_parameters[cls.name.text]
+            previous = len(used)
+            scope = {parameter.text for parameter in cls.type_parameters}
+            for variable in cls.fields:
+                used.update(used_parameters(variable.type, scope))
+            changed |= len(used) != previous
+
+    def value_dependencies(type_name):
+        if type_name.pointers:
+            return
+        if type_name.name in classes:
+            yield classes[type_name.name]
+        for argument in embedded_arguments(type_name):
+            yield from value_dependencies(argument)
 
     def visit(cls):
         name = cls.name.text
@@ -584,8 +776,8 @@ def validate(program: Program, filename: str) -> list[Class]:
             return
         active.add(name)
         for variable in cls.fields:
-            if variable.type.text in classes:
-                visit(classes[variable.type.text])
+            for dependency in value_dependencies(variable.type):
+                visit(dependency)
         active.remove(name)
         done.add(name)
         ordered.append(cls)
@@ -610,7 +802,7 @@ class Generator:
     def expression(self, expr: Expr) -> str:
         text = expr.token.text
         arguments = [self.expression(arg) for arg in expr.args]
-        if expr.kind == "name":
+        if expr.kind in {"name", "generic_name"}:
             return "simple_c_detail::print" if text == "print" else text
         if expr.kind == "literal":
             # Decimal integer spelling must not turn into C++ octal.
@@ -696,6 +888,16 @@ class Generator:
     def constructor_parameters(cls, count):
         return ", ".join(f"{variable.type.text} _sc_arg_{index}" for index, variable in enumerate(cls.fields[:count]))
 
+    def template_parameters(self, parameters):
+        if parameters:
+            self.emit("template <" + ", ".join("typename " + parameter.text for parameter in parameters) + ">")
+
+    @staticmethod
+    def class_type(cls):
+        if cls.type_parameters:
+            return cls.name.text + "<" + ", ".join(parameter.text for parameter in cls.type_parameters) + ">"
+        return cls.name.text
+
     def generate(self, program, classes):
         self.emit("// Generated by Simple C. Compile as C++17 or later.")
         if program.links:
@@ -717,13 +919,17 @@ class Generator:
         self.emit("}")
         self.emit()
         for cls in classes:
+            self.location(cls.name)
+            self.template_parameters(cls.type_parameters)
             self.emit(f"struct {cls.name.text};")
         for function in program.functions:
             self.location(function.name)
+            self.template_parameters(function.type_parameters)
             self.emit(self.signature(function) + ";")
         self.emit()
         for cls in classes:
             self.location(cls.name)
+            self.template_parameters(cls.type_parameters)
             self.emit(f"struct {cls.name.text} {{")
             for variable in cls.fields:
                 self.location(variable.name)
@@ -738,9 +944,11 @@ class Generator:
             self.emit()
         for cls in classes:
             name = cls.name.text
+            class_type = self.class_type(cls)
             for count in self.constructor_arities(cls):
                 self.location(cls.name)
-                self.emit(f"{name}::{name}({self.constructor_parameters(cls, count)})")
+                self.template_parameters(cls.type_parameters)
+                self.emit(f"{class_type}::{name}({self.constructor_parameters(cls, count)})")
                 initializers = []
                 for index, variable in enumerate(cls.fields):
                     value = f"_sc_arg_{index}" if index < count else self.expression(variable.initializer)
@@ -750,11 +958,13 @@ class Generator:
                 self.emit("{}")
             for method in cls.methods:
                 self.location(method.name)
-                self.emit(self.signature(method, name + "::"))
+                self.template_parameters(cls.type_parameters)
+                self.emit(self.signature(method, class_type + "::"))
                 self.body(method.body, 0)
             self.emit()
         for function in program.functions:
             self.location(function.name)
+            self.template_parameters(function.type_parameters)
             self.emit(self.signature(function))
             self.body(function.body, 0)
             self.emit()
@@ -779,8 +989,8 @@ def transpile_project(path: Path, *, output_paths=()) -> TranspileResult:
     """Return generated C++ and link requirements for the complete import graph."""
     loader = ModuleLoader()
     loader.load(Path(path))
-    loader.protect_sources(output_paths)
     program = loader.combined()
+    loader.protect_sources(output_paths)
     classes = validate(program, str(path))
     return TranspileResult(Generator(str(path)).generate(program, classes), linked_libraries(program))
 
